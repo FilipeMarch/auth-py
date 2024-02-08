@@ -864,6 +864,13 @@ class AsyncGoTrueClient(AsyncGoTrueBaseAPI):
         if self._persist_session and session.expires_at:
             await self._storage.set_item(self._storage_key, model_dump_json(session))
 
+    def _is_trio_available(self) -> bool:
+        try:
+            import trio
+            return True
+        except ImportError:
+            return False
+
     async def _start_auto_refresh_token(self, value: float) -> None:
         if self._refresh_token_timer:
             self._refresh_token_timer.cancel()
@@ -887,8 +894,23 @@ class AsyncGoTrueClient(AsyncGoTrueBaseAPI):
                         RETRY_INTERVAL ** (self._network_retries * 100)
                     )
 
-        self._refresh_token_timer = Timer(value, refresh_token_function)
-        self._refresh_token_timer.start()
+        def sleep_and_refresh_token_asyncio():
+            self._refresh_token_timer = Timer(value, refresh_token_function)
+            self._refresh_token_timer.start()
+
+        async def sleep_and_refresh_token_trio():
+            await trio.sleep(value / 1000)
+            await refresh_token_function()
+
+        if self._is_trio_available:
+            import trio
+            task = trio.lowlevel.current_task()
+            if task:
+                task.parent_nursery.start_soon(sleep_and_refresh_token_trio)
+            else:
+                sleep_and_refresh_token_asyncio()    
+        else:
+            sleep_and_refresh_token_asyncio()
 
     def _notify_all_subscribers(
         self,
